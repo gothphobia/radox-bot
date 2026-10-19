@@ -4,12 +4,14 @@ import asyncio
 import time
 import ssl
 import certifi
+import base64
 import aiohttp
+from io import BytesIO
 from pathlib import Path
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import Message, CallbackQuery, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
@@ -41,7 +43,7 @@ HEADERS = {
 
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 
-# --- БЛОКИРОВКА ПОСЛЕ 1 ПРЕДУПРЕЖДЕНИЯ ---
+# --- БЛОКИРОВКА ПОСЛЕ 1 ПРЕДУПРЕЖДЕНИЯ, НЕПРОБИВАЕМАЯ ---
 BLOCKED_FILE = Path(__file__).parent / "blocked.json"
 already_warned = set()
 if BLOCKED_FILE.exists():
@@ -50,23 +52,39 @@ if BLOCKED_FILE.exists():
     except:
         already_warned = set()
 
-
 def save_blocked():
     try:
         BLOCKED_FILE.write_text(json.dumps(list(already_warned)), encoding="utf-8")
     except:
         pass
 
-
 def is_allowed(user) -> bool:
     if not user or not user.username:
         return False
     return user.username.lower() == ALLOWED_USERNAME.lower()
 
-
 class WhitelistMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        user = getattr(event, "from_user", None)
+        user = None
+        # определяем юзера из любого типа апдейта
+        if isinstance(event, Update):
+            if event.message:
+                user = event.message.from_user
+            elif event.edited_message:
+                user = event.edited_message.from_user
+            elif event.callback_query:
+                user = event.callback_query.from_user
+            elif event.inline_query:
+                user = event.inline_query.from_user
+            elif event.channel_post:
+                user = event.channel_post.from_user
+            elif event.edited_channel_post:
+                user = event.edited_channel_post.from_user
+        elif isinstance(event, Message):
+            user = event.from_user
+        elif isinstance(event, CallbackQuery):
+            user = event.from_user
+
         if user is None:
             return await handler(event, data)
 
@@ -80,22 +98,30 @@ class WhitelistMiddleware(BaseMiddleware):
         # первый раз - отвечаем 1 раз и запоминаем
         already_warned.add(user.id)
         save_blocked()
-        if isinstance(event, Message):
-            await event.answer("ничем не могу помочь xd")
-        elif isinstance(event, CallbackQuery):
-            try:
+        try:
+            if isinstance(event, Update):
                 if event.message:
                     await event.message.answer("ничем не могу помочь xd")
-            except:
-                pass
-            await event.answer("ничем не могу помочь xd", show_alert=True)
+                elif event.edited_message:
+                    await event.edited_message.answer("ничем не могу помочь xd")
+                elif event.callback_query:
+                    if event.callback_query.message:
+                        await event.callback_query.message.answer("ничем не могу помочь xd")
+                    await event.callback_query.answer("ничем не могу помочь xd", show_alert=True)
+                elif event.inline_query:
+                    await bot.answer_inline_query(event.inline_query.id, [], cache_time=3600)
+                else:
+                    await bot.send_message(user.id, "ничем не могу помочь xd")
+            elif isinstance(event, Message):
+                await event.answer("ничем не могу помочь xd")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("ничем не могу помочь xd", show_alert=True)
+        except:
+            pass
         return
 
-
-# подключаем проверку на все сообщения и кнопки
-dp.message.middleware(WhitelistMiddleware())
-dp.callback_query.middleware(WhitelistMiddleware())
-
+# ставим на самый верхний уровень - режет все до хэндлеров и до нейросети
+dp.update.outer_middleware(WhitelistMiddleware())
 
 def get_history_with_system(uid: int):
     if uid not in user_history or not user_history[uid]:
@@ -106,7 +132,6 @@ def get_history_with_system(uid: int):
         user_history[uid][0]["content"] = SYSTEM_PROMPT
     return user_history[uid]
 
-
 def models_keyboard(models: list):
     builder = InlineKeyboardBuilder()
     for m in models:
@@ -114,12 +139,10 @@ def models_keyboard(models: list):
     builder.adjust(2)
     return builder.as_markup()
 
-
 def change_model_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="сменить модель :3", callback_data="change_model")]
     ])
-
 
 async def get_models():
     connector = aiohttp.TCPConnector(ssl=ssl_context)
@@ -129,7 +152,6 @@ async def get_models():
             if "data" in data:
                 return [m["id"] for m in data["data"]]
             return data
-
 
 async def stream_chat(model: str, messages: list):
     payload = {
@@ -162,6 +184,23 @@ async def stream_chat(model: str, messages: list):
                         continue
             yield "", usage
 
+async def photo_to_base64(message: Message):
+    file_id = None
+    if message.photo:
+        file_id = message.photo[-1].file_id
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith("image/"):
+        file_id = message.document.file_id
+    else:
+        return None
+    file = await bot.get_file(file_id)
+    buf = BytesIO()
+    await bot.download(file, buf)
+    buf.seek(0)
+    b64 = base64.b64encode(buf.read()).decode("utf-8")
+    mime = "image/jpeg"
+    if message.document and message.document.mime_type:
+        mime = message.document.mime_type
+    return f"data:{mime};base64,{b64}"
 
 async def set_commands():
     await bot.set_my_commands([
@@ -169,7 +208,6 @@ async def set_commands():
         BotCommand(command="models", description="сменить модель :3"),
         BotCommand(command="clear", description="очистить историю"),
     ])
-
 
 @dp.message(CommandStart())
 async def start(message: Message):
@@ -180,18 +218,15 @@ async def start(message: Message):
     except Exception as e:
         await message.answer(f"ошибка: {e}")
 
-
 @dp.message(Command("models"))
 async def show_models(message: Message):
     models = await get_models()
     await message.answer("выбери модель ^-^", reply_markup=models_keyboard(models))
 
-
 @dp.message(Command("clear"))
 async def clear_history(message: Message):
     user_history[message.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     await message.answer("история очищена, можем начать заново :3")
-
 
 @dp.callback_query(F.data.startswith("model:"))
 async def select_model(callback: CallbackQuery):
@@ -201,15 +236,13 @@ async def select_model(callback: CallbackQuery):
     await callback.message.edit_text(f"выбрана `{model}` ^^ теперь напиши сообщение", parse_mode="Markdown")
     await callback.answer()
 
-
 @dp.callback_query(F.data == "change_model")
 async def change_model_btn(callback: CallbackQuery):
     models = await get_models()
     await callback.message.answer("выбери другую модель :d", reply_markup=models_keyboard(models))
     await callback.answer()
 
-
-@dp.message(F.text)
+@dp.message(F.photo | F.document | F.text)
 async def handle_prompt(message: Message):
     uid = message.from_user.id
     if uid not in user_model:
@@ -217,7 +250,30 @@ async def handle_prompt(message: Message):
         return
     model = user_model[uid]
     history = get_history_with_system(uid)
-    history.append({"role": "user", "content": message.text})
+
+    text = message.caption or message.text or ""
+    if not text and message.photo:
+        text = "что на этом изображении?"
+
+    image_url = None
+    if message.photo or (message.document and message.document.mime_type and message.document.mime_type.startswith("image/")):
+        try:
+            image_url = await photo_to_base64(message)
+        except Exception as e:
+            await message.answer(f"не смогла скачать картинку: {e}")
+            return
+
+    if image_url:
+        user_content = [
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]
+        history.append({"role": "user", "content": user_content})
+    else:
+        if not text:
+            return
+        history.append({"role": "user", "content": text})
+
     msg = await message.answer(f"▌", parse_mode="Markdown")
     full_text = ""
     final_usage = {}
@@ -255,13 +311,11 @@ async def handle_prompt(message: Message):
     except Exception as e:
         await msg.edit_text(f"ошибка: {e}")
 
-
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await set_commands()
     print("Бот запущен...")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
