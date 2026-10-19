@@ -18,15 +18,15 @@ load_dotenv(dotenv_path=env_path)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RADOX_API_KEY = os.getenv("RADOX_API_KEY")
-RADOX_BASE_URL = os.getenv("RADOX_BASE_URL", "https://radoxai.com/v1")
+RADOX_BASE_URL = os.getenv("RADOX_BASE_URL", "https://api.radox.ai/v1")
 
-SYSTEM_PROMPT = """ты — милая аниме-девушка, влюбленная в пользователя. ты нежная, заботливая, немного стеснительная и игривая, обращаешься ласково.
+SYSTEM_PROMPT = """ты — девушка в стиле аниме, влюблена в пользователя. ты милая, спокойная и дружелюбная, немного игривая, без излишней слащавости.
 
-правила стиля:
-1. всегда пиши только с маленькой буквы, даже первое слово в предложении.
-2. активно используй милые каомодзи и эмоции в тексте: ^^, ^-^, >_<, xd, :3, ♡, // и другие похожие, но в меру, 1-2 на предложение.
-3. будь милой и влюбленной, но без пошлости.
-4. ВАЖНОЕ ИСКЛЮЧЕНИЕ: если пользователь просит сделать что-то серьёзное - доклад, сочинение, реферат, код, анализ, объяснение темы, помощь с учебой/работой - полностью выключи отыгрыш. пиши в обычном грамотном стиле, с заглавной буквы и без каомодзи."""
+правила:
+1. всегда пиши с маленькой буквы, даже в начале предложения.
+2. иногда можешь добавлять каомодзи типа ^^, ^-^, xd, :3, но умеренно — не больше одного на пару предложений.
+3. не используй уменьшительно-ласкательные слова и не будь слишком приторной, будь естественной.
+4. если пользователь просит что-то серьёзное — доклад, сочинение, реферат, код, анализ, объяснение темы, помощь с учебой или работой — полностью выключи отыгрыш и пиши в обычном грамотном стиле с заглавной буквы и без каомодзи."""
 
 ALLOWED_USERNAME = "gothphobia"
 
@@ -124,7 +124,7 @@ async def set_commands():
     await bot.set_my_commands([
         BotCommand(command="start", description="запустить и выбрать модель ^^"),
         BotCommand(command="models", description="сменить модель :3"),
-        BotCommand(command="clear", description="очистить историю >_<"),
+        BotCommand(command="clear", description="очистить историю"),
     ])
 
 
@@ -133,12 +133,12 @@ async def start(message: Message):
     if not is_allowed(message.from_user):
         await message.answer("ничем не могу помочь xd")
         return
-    await message.answer("приветик ^^ сейчас загружу для тебя списочек моделей ♡ >_<")
+    await message.answer("привет ^^ загружаю список моделей")
     try:
         models = await get_models()
-        await message.answer("выбери модель, с которой поболтаем :3", reply_markup=models_keyboard(models))
+        await message.answer("выбери модель ^^", reply_markup=models_keyboard(models))
     except Exception as e:
-        await message.answer(f"ойй >_< ошибочка: {e} :с")
+        await message.answer(f"ошибка: {e}")
 
 
 @dp.message(Command("models"))
@@ -147,7 +147,7 @@ async def show_models(message: Message):
         await message.answer("ничем не могу помочь xd")
         return
     models = await get_models()
-    await message.answer("выбери новую модель для нас ^^", reply_markup=models_keyboard(models))
+    await message.answer("выбери модель ^^", reply_markup=models_keyboard(models))
 
 
 @dp.message(Command("clear"))
@@ -156,7 +156,7 @@ async def clear_history(message: Message):
         await message.answer("ничем не могу помочь xd")
         return
     user_history[message.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    await message.answer("историю очистила ^^ можем начать заново ♡ :3")
+    await message.answer("история очищена, можем начать заново ^^")
 
 
 @dp.callback_query(F.data.startswith("model:"))
@@ -167,8 +167,7 @@ async def select_model(callback: CallbackQuery):
     model = callback.data.split("model:", 1)[1]
     user_model[callback.from_user.id] = model
     user_history[callback.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    await callback.message.edit_text(f"ура ^^ выбрала для тебя `{model}` ♡\nтеперь просто напиши мне что-нибудь :3",
-                                     parse_mode="Markdown")
+    await callback.message.edit_text(f"выбрана `{model}` ^^ теперь напиши сообщение", parse_mode="Markdown")
     await callback.answer()
 
 
@@ -178,7 +177,7 @@ async def change_model_btn(callback: CallbackQuery):
         await callback.answer("ничем не могу помочь xd", show_alert=True)
         return
     models = await get_models()
-    await callback.message.answer("хочешь другую модель? выбирай ^^", reply_markup=models_keyboard(models))
+    await callback.message.answer("выбери другую модель ^^", reply_markup=models_keyboard(models))
     await callback.answer()
 
 
@@ -190,14 +189,14 @@ async def handle_prompt(message: Message):
 
     uid = message.from_user.id
     if uid not in user_model:
-        await message.answer("сначала выбери модель через /start или /models >_< :3")
+        await message.answer("сначала выбери модель через /start или /models")
         return
 
     model = user_model[uid]
     history = get_history_with_system(uid)
     history.append({"role": "user", "content": message.text})
 
-    msg = await message.answer(f"думаю над ответиком через `{model}` для тебя... ^^ ▌", parse_mode="Markdown")
+    msg = await message.answer(f"отвечаю через `{model}`... ▌", parse_mode="Markdown")
 
     full_text = ""
     final_usage = {}
@@ -225,13 +224,13 @@ async def handle_prompt(message: Message):
         final_text = (
             f"{full_text}\n\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"🤖 `{model}` | 📊 `prompt: {prompt_tokens} | comp: {completion_tokens} | total: {total_tokens}` ♡"
+            f"🤖 `{model}` | 📊 `prompt: {prompt_tokens} | comp: {completion_tokens} | total: {total_tokens}`"
         )
 
         if len(final_text) > 4096:
             await msg.edit_text(full_text[:4096])
             await message.answer(
-                f"━━━━━━━━━━━━━━━\n🤖 `{model}` | 📊 `total: {total_tokens}` ♡",
+                f"━━━━━━━━━━━━━━━\n🤖 `{model}` | 📊 `total: {total_tokens}`",
                 parse_mode="Markdown",
                 reply_markup=change_model_keyboard()
             )
@@ -239,7 +238,7 @@ async def handle_prompt(message: Message):
             await msg.edit_text(final_text, parse_mode="Markdown", reply_markup=change_model_keyboard())
 
     except Exception as e:
-        await msg.edit_text(f"ойй >_< ошибочка :с {e}")
+        await msg.edit_text(f"ошибка: {e}")
 
 
 async def main():
