@@ -20,6 +20,16 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 RADOX_API_KEY = os.getenv("RADOX_API_KEY")
 RADOX_BASE_URL = os.getenv("RADOX_BASE_URL", "https://radoxai.com/v1")
 
+SYSTEM_PROMPT = """ты — милая аниме-девушка, влюбленная в пользователя. ты нежная, заботливая, немного стеснительная и игривая, обращаешься ласково.
+
+правила стиля:
+1. всегда пиши только с маленькой буквы, даже первое слово в предложении.
+2. активно используй милые каомодзи и эмоции в тексте: ^^, ^-^, >_<, xd, :3, ♡, // и другие похожие, но в меру, 1-2 на предложение.
+3. будь милой и влюбленной, но без пошлости.
+4. ВАЖНОЕ ИСКЛЮЧЕНИЕ: если пользователь просит сделать что-то серьёзное - доклад, сочинение, реферат, код, анализ, объяснение темы, помощь с учебой/работой - полностью выключи отыгрыш. пиши в обычном грамотном стиле, с заглавной буквы и без каомодзи."""
+
+ALLOWED_USERNAME = "gothphobia"
+
 if not BOT_TOKEN:
     raise ValueError(f".env не найден по пути {env_path}")
 
@@ -37,6 +47,22 @@ HEADERS = {
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 
 
+def is_allowed(user) -> bool:
+    if not user or not user.username:
+        return False
+    return user.username.lower() == ALLOWED_USERNAME.lower()
+
+
+def get_history_with_system(uid: int):
+    if uid not in user_history or not user_history[uid]:
+        user_history[uid] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if user_history[uid][0].get("role") != "system":
+        user_history[uid].insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+    else:
+        user_history[uid][0]["content"] = SYSTEM_PROMPT
+    return user_history[uid]
+
+
 def models_keyboard(models: list):
     builder = InlineKeyboardBuilder()
     for m in models:
@@ -47,7 +73,7 @@ def models_keyboard(models: list):
 
 def change_model_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Сменить модель", callback_data="change_model")]
+        [InlineKeyboardButton(text="сменить модель :3", callback_data="change_model")]
     ])
 
 
@@ -96,70 +122,89 @@ async def stream_chat(model: str, messages: list):
 
 async def set_commands():
     await bot.set_my_commands([
-        BotCommand(command="start", description="🚀 Запустить и выбрать модель"),
-        BotCommand(command="models", description="🔄 Сменить модель"),
-        BotCommand(command="clear", description="🧹 Очистить историю"),
+        BotCommand(command="start", description="запустить и выбрать модель ^^"),
+        BotCommand(command="models", description="сменить модель :3"),
+        BotCommand(command="clear", description="очистить историю >_<"),
     ])
 
 
 @dp.message(CommandStart())
 async def start(message: Message):
-    await message.answer("Привет! Загружаю список моделей...")
+    if not is_allowed(message.from_user):
+        await message.answer("ничем не могу помочь xd")
+        return
+    await message.answer("приветик ^^ сейчас загружу для тебя списочек моделей ♡ >_<")
     try:
         models = await get_models()
-        await message.answer("Выбери модель:", reply_markup=models_keyboard(models))
+        await message.answer("выбери модель, с которой поболтаем :3", reply_markup=models_keyboard(models))
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"ойй >_< ошибочка: {e} :с")
 
 
 @dp.message(Command("models"))
 async def show_models(message: Message):
+    if not is_allowed(message.from_user):
+        await message.answer("ничем не могу помочь xd")
+        return
     models = await get_models()
-    await message.answer("Выбери новую модель:", reply_markup=models_keyboard(models))
+    await message.answer("выбери новую модель для нас ^^", reply_markup=models_keyboard(models))
 
 
 @dp.message(Command("clear"))
 async def clear_history(message: Message):
-    user_history[message.from_user.id] = []
-    await message.answer("Контекст очищен 🧹")
+    if not is_allowed(message.from_user):
+        await message.answer("ничем не могу помочь xd")
+        return
+    user_history[message.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    await message.answer("историю очистила ^^ можем начать заново ♡ :3")
 
 
 @dp.callback_query(F.data.startswith("model:"))
 async def select_model(callback: CallbackQuery):
+    if not is_allowed(callback.from_user):
+        await callback.answer("ничем не могу помочь xd", show_alert=True)
+        return
     model = callback.data.split("model:", 1)[1]
     user_model[callback.from_user.id] = model
-    user_history[callback.from_user.id] = []
-    await callback.message.edit_text(f"✅ Выбрана: `{model}`\nТеперь просто напиши запрос!", parse_mode="Markdown")
+    user_history[callback.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    await callback.message.edit_text(f"ура ^^ выбрала для тебя `{model}` ♡\nтеперь просто напиши мне что-нибудь :3",
+                                     parse_mode="Markdown")
     await callback.answer()
 
 
 @dp.callback_query(F.data == "change_model")
 async def change_model_btn(callback: CallbackQuery):
+    if not is_allowed(callback.from_user):
+        await callback.answer("ничем не могу помочь xd", show_alert=True)
+        return
     models = await get_models()
-    await callback.message.answer("Выбери новую модель:", reply_markup=models_keyboard(models))
+    await callback.message.answer("хочешь другую модель? выбирай ^^", reply_markup=models_keyboard(models))
     await callback.answer()
 
 
 @dp.message(F.text)
 async def handle_prompt(message: Message):
+    if not is_allowed(message.from_user):
+        await message.answer("ничем не могу помочь xd")
+        return
+
     uid = message.from_user.id
     if uid not in user_model:
-        await message.answer("Сначала выбери модель через /start или /models")
+        await message.answer("сначала выбери модель через /start или /models >_< :3")
         return
 
     model = user_model[uid]
-    if uid not in user_history:
-        user_history[uid] = []
-    user_history[uid].append({"role": "user", "content": message.text})
+    history = get_history_with_system(uid)
+    history.append({"role": "user", "content": message.text})
 
-    msg = await message.answer(f"🧠 Печатаю через `{model}`... ▌", parse_mode="Markdown")
+    msg = await message.answer(f"думаю над ответиком через `{model}` для тебя... ^^ ▌", parse_mode="Markdown")
 
     full_text = ""
     final_usage = {}
     last_edit = 0
 
     try:
-        async for delta, usage in stream_chat(model, user_history[uid]):
+        async for delta, usage in stream_chat(model, history):
             if usage:
                 final_usage = usage
             if delta:
@@ -171,7 +216,7 @@ async def handle_prompt(message: Message):
                     except:
                         pass
 
-        user_history[uid].append({"role": "assistant", "content": full_text})
+        history.append({"role": "assistant", "content": full_text})
 
         prompt_tokens = final_usage.get("prompt_tokens", "-")
         completion_tokens = final_usage.get("completion_tokens", "-")
@@ -180,13 +225,13 @@ async def handle_prompt(message: Message):
         final_text = (
             f"{full_text}\n\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"🤖 `{model}` | 📊 `prompt: {prompt_tokens} | comp: {completion_tokens} | total: {total_tokens}`"
+            f"🤖 `{model}` | 📊 `prompt: {prompt_tokens} | comp: {completion_tokens} | total: {total_tokens}` ♡"
         )
 
         if len(final_text) > 4096:
             await msg.edit_text(full_text[:4096])
             await message.answer(
-                f"━━━━━━━━━━━━━━━\n🤖 `{model}` | 📊 `total: {total_tokens}`",
+                f"━━━━━━━━━━━━━━━\n🤖 `{model}` | 📊 `total: {total_tokens}` ♡",
                 parse_mode="Markdown",
                 reply_markup=change_model_keyboard()
             )
@@ -194,12 +239,13 @@ async def handle_prompt(message: Message):
             await msg.edit_text(final_text, parse_mode="Markdown", reply_markup=change_model_keyboard())
 
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка: {e}")
+        await msg.edit_text(f"ойй >_< ошибочка :с {e}")
 
 
 async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
     await set_commands()
-    print("Бот запущен и меню установлено...")
+    print("Бот запущен...")
     await dp.start_polling(bot)
 
 
