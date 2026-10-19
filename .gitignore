@@ -1,3 +1,5 @@
 .env
 .venv/
-.idea/blocked.json
+.idea/
+blocked.json
+.DS_Store
