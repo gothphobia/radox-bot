@@ -12,6 +12,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
@@ -20,7 +21,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 RADOX_API_KEY = os.getenv("RADOX_API_KEY")
 RADOX_BASE_URL = os.getenv("RADOX_BASE_URL", "https://api.radox.ai/v1")
 
-SYSTEM_PROMPT = """ты — девушка в стиле аниме, влюблена в пользователя. ты милая, спокойная и дружелюбная, немного игривая, без излишней слащавости.
+SYSTEM_PROMPT = """ты — девушка в стиле аниме. ты милая, спокойная и дружелюбная, немного игривая, без излишней слащавости.
 
 правила:
 1. всегда пиши с маленькой буквы, даже в начале предложения.
@@ -46,11 +47,60 @@ HEADERS = {
 
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 
+# --- БЛОКИРОВКА ПОСЛЕ 1 ПРЕДУПРЕЖДЕНИЯ ---
+BLOCKED_FILE = Path(__file__).parent / "blocked.json"
+already_warned = set()
+if BLOCKED_FILE.exists():
+    try:
+        already_warned = set(json.loads(BLOCKED_FILE.read_text(encoding="utf-8")))
+    except:
+        already_warned = set()
+
+
+def save_blocked():
+    try:
+        BLOCKED_FILE.write_text(json.dumps(list(already_warned)), encoding="utf-8")
+    except:
+        pass
+
 
 def is_allowed(user) -> bool:
     if not user or not user.username:
         return False
     return user.username.lower() == ALLOWED_USERNAME.lower()
+
+
+class WhitelistMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user is None:
+            return await handler(event, data)
+
+        if is_allowed(user):
+            return await handler(event, data)
+
+        # не gothphobia
+        if user.id in already_warned:
+            return  # полный игнор, даже без ответа
+
+        # первый раз - отвечаем 1 раз и запоминаем
+        already_warned.add(user.id)
+        save_blocked()
+        if isinstance(event, Message):
+            await event.answer("ничем не могу помочь xd")
+        elif isinstance(event, CallbackQuery):
+            try:
+                if event.message:
+                    await event.message.answer("ничем не могу помочь xd")
+            except:
+                pass
+            await event.answer("ничем не могу помочь xd", show_alert=True)
+        return
+
+
+# подключаем проверку на все сообщения и кнопки
+dp.message.middleware(WhitelistMiddleware())
+dp.callback_query.middleware(WhitelistMiddleware())
 
 
 def get_history_with_system(uid: int):
@@ -100,7 +150,6 @@ async def stream_chat(model: str, messages: list):
             if resp.status != 200:
                 data = await resp.text()
                 raise Exception(f"Ошибка API {resp.status}: {data}")
-
             usage = {}
             async for line in resp.content:
                 line = line.decode("utf-8").strip()
@@ -130,40 +179,28 @@ async def set_commands():
 
 @dp.message(CommandStart())
 async def start(message: Message):
-    if not is_allowed(message.from_user):
-        await message.answer("ничем не могу помочь xd")
-        return
     await message.answer("привет ^^ загружаю список моделей")
     try:
         models = await get_models()
-        await message.answer("выбери модель ^^", reply_markup=models_keyboard(models))
+        await message.answer("выбери модель ^-^", reply_markup=models_keyboard(models))
     except Exception as e:
         await message.answer(f"ошибка: {e}")
 
 
 @dp.message(Command("models"))
 async def show_models(message: Message):
-    if not is_allowed(message.from_user):
-        await message.answer("ничем не могу помочь xd")
-        return
     models = await get_models()
-    await message.answer("выбери модель ^^", reply_markup=models_keyboard(models))
+    await message.answer("выбери модель ^-^", reply_markup=models_keyboard(models))
 
 
 @dp.message(Command("clear"))
 async def clear_history(message: Message):
-    if not is_allowed(message.from_user):
-        await message.answer("ничем не могу помочь xd")
-        return
     user_history[message.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    await message.answer("история очищена, можем начать заново ^^")
+    await message.answer("история очищена, можем начать заново :3")
 
 
 @dp.callback_query(F.data.startswith("model:"))
 async def select_model(callback: CallbackQuery):
-    if not is_allowed(callback.from_user):
-        await callback.answer("ничем не могу помочь xd", show_alert=True)
-        return
     model = callback.data.split("model:", 1)[1]
     user_model[callback.from_user.id] = model
     user_history[callback.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -173,35 +210,24 @@ async def select_model(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "change_model")
 async def change_model_btn(callback: CallbackQuery):
-    if not is_allowed(callback.from_user):
-        await callback.answer("ничем не могу помочь xd", show_alert=True)
-        return
     models = await get_models()
-    await callback.message.answer("выбери другую модель ^^", reply_markup=models_keyboard(models))
+    await callback.message.answer("выбери другую модель :d", reply_markup=models_keyboard(models))
     await callback.answer()
 
 
 @dp.message(F.text)
 async def handle_prompt(message: Message):
-    if not is_allowed(message.from_user):
-        await message.answer("ничем не могу помочь xd")
-        return
-
     uid = message.from_user.id
     if uid not in user_model:
         await message.answer("сначала выбери модель через /start или /models")
         return
-
     model = user_model[uid]
     history = get_history_with_system(uid)
     history.append({"role": "user", "content": message.text})
-
-    msg = await message.answer(f"отвечаю через `{model}`... ▌", parse_mode="Markdown")
-
+    msg = await message.answer(f"▌", parse_mode="Markdown")
     full_text = ""
     final_usage = {}
     last_edit = 0
-
     try:
         async for delta, usage in stream_chat(model, history):
             if usage:
@@ -214,19 +240,15 @@ async def handle_prompt(message: Message):
                         last_edit = time.time()
                     except:
                         pass
-
         history.append({"role": "assistant", "content": full_text})
-
         prompt_tokens = final_usage.get("prompt_tokens", "-")
         completion_tokens = final_usage.get("completion_tokens", "-")
         total_tokens = final_usage.get("total_tokens", "-")
-
         final_text = (
             f"{full_text}\n\n"
             f"━━━━━━━━━━━━━━━\n"
             f"🤖 `{model}` | 📊 `prompt: {prompt_tokens} | comp: {completion_tokens} | total: {total_tokens}`"
         )
-
         if len(final_text) > 4096:
             await msg.edit_text(full_text[:4096])
             await message.answer(
@@ -236,7 +258,6 @@ async def handle_prompt(message: Message):
             )
         else:
             await msg.edit_text(final_text, parse_mode="Markdown", reply_markup=change_model_keyboard())
-
     except Exception as e:
         await msg.edit_text(f"ошибка: {e}")
 
