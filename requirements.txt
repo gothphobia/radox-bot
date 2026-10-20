@@ -2,3 +2,5 @@ aiogram>=3.0
 aiohttp
 python-dotenv
 certifi
+pypdf
+python-docx
