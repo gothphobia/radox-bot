@@ -471,7 +471,7 @@ async def process_single_or_album(messages: list):
             if not text:
                 return
             history.append({"role": "user", "content": text})
-    msg = await first.answer(f"▌ {kao()}")
+    msg = await first.answer(f"▌")
     full = ""
     last = 0
     try:
