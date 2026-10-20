@@ -289,7 +289,7 @@ async def process_single_or_album(messages: list):
             return
         history.append({"role": "user", "content": text})
 
-    msg = await first.answer(f"▌ {kao()}", parse_mode="Markdown")
+    msg = await first.answer(f"▌", parse_mode="Markdown")
     full_text = ""
     last_edit = 0
     try:
