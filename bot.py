@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import time
+import random
 import ssl
 import certifi
 import base64
@@ -21,9 +22,18 @@ load_dotenv(dotenv_path=env_path)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RADOX_API_KEY = os.getenv("RADOX_API_KEY")
-RADOX_BASE_URL = os.getenv("RADOX_BASE_URL", "https://api.radox.ai/v1")
+RADOX_BASE_URL = os.getenv("RADOX_BASE_URL", "https://radoxai.com/v1")
 
-SYSTEM_PROMPT = """ты — спокойная аниме-девушка. пиши только с маленькой буквы, каомодзи :3, ^^, xd умеренно. без слащавости. на серьезные запросы — обычный грамотный стиль без отыгрыша."""
+# разнообразь тут если хочешь
+KAOMOJI = ["^^", "^-^", ">_<", "xd", ":3", ":p", ">//<", "uwu",  "♡"]
+def kao():
+    return random.choice(KAOMOJI)
+
+SYSTEM_PROMPT = """ты — спокойная аниме-девушка. пиши только с маленькой буквы, без слащавости и без уменьшительно-ласкательных.
+
+стиль: используй каомодзи умеренно, 1 на 1-2 предложения, и обязательно чередуй их — бери разные из списка ^^, ^-^, >_<, xd, :3, :p, >//<, uwu, ;_;, ♡ и похожие, не повторяй один и тот же постоянно.
+
+на серьезные запросы — доклад, сочинение, реферат, код, анализ, объяснение — полностью выключи отыгрыш и пиши обычным грамотным стилем с заглавной буквы и без каомодзи."""
 
 ALLOWED_USERNAME = "gothphobia"
 
@@ -66,7 +76,6 @@ def is_allowed(user) -> bool:
 class WhitelistMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = None
-        # определяем юзера из любого типа апдейта
         if isinstance(event, Update):
             if event.message:
                 user = event.message.from_user
@@ -87,15 +96,10 @@ class WhitelistMiddleware(BaseMiddleware):
 
         if user is None:
             return await handler(event, data)
-
         if is_allowed(user):
             return await handler(event, data)
-
-        # не gothphobia
         if user.id in already_warned:
-            return  # полный игнор, даже без ответа
-
-        # первый раз - отвечаем 1 раз и запоминаем
+            return
         already_warned.add(user.id)
         save_blocked()
         try:
@@ -120,8 +124,11 @@ class WhitelistMiddleware(BaseMiddleware):
             pass
         return
 
-# ставим на самый верхний уровень - режет все до хэндлеров и до нейросети
 dp.update.outer_middleware(WhitelistMiddleware())
+
+# --- альбомы ---
+album_buffer = {} # {media_group_id: [Message]}
+album_tasks = {}  # {media_group_id: Task}
 
 def get_history_with_system(uid: int):
     if uid not in user_history or not user_history[uid]:
@@ -141,7 +148,7 @@ def models_keyboard(models: list):
 
 def change_model_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="сменить модель :3", callback_data="change_model")]
+        [InlineKeyboardButton(text=f"сменить модель {kao()}", callback_data="change_model")]
     ])
 
 async def get_models():
@@ -166,7 +173,6 @@ async def stream_chat(model: str, messages: list):
             if resp.status != 200:
                 data = await resp.text()
                 raise Exception(f"Ошибка API {resp.status}: {data}")
-            usage = {}
             async for line in resp.content:
                 line = line.decode("utf-8").strip()
                 if not line or line == "data: [DONE]":
@@ -175,14 +181,11 @@ async def stream_chat(model: str, messages: list):
                     json_str = line[6:]
                     try:
                         chunk = json.loads(json_str)
-                        if "usage" in chunk and chunk["usage"]:
-                            usage = chunk["usage"]
                         delta = chunk["choices"][0].get("delta", {}).get("content", "")
                         if delta:
-                            yield delta, None
+                            yield delta
                     except:
                         continue
-            yield "", usage
 
 async def photo_to_base64(message: Message):
     file_id = None
@@ -204,112 +207,130 @@ async def photo_to_base64(message: Message):
 
 async def set_commands():
     await bot.set_my_commands([
-        BotCommand(command="start", description="запустить и выбрать модель ^^"),
-        BotCommand(command="models", description="сменить модель :3"),
+        BotCommand(command="start", description=f"запустить и выбрать модель {kao()}"),
+        BotCommand(command="models", description=f"сменить модель {kao()}"),
         BotCommand(command="clear", description="очистить историю"),
     ])
 
 @dp.message(CommandStart())
 async def start(message: Message):
-    await message.answer("привет ^^ загружаю список моделей")
+    await message.answer(f"привет {kao()} загружаю список моделей")
     try:
         models = await get_models()
-        await message.answer("выбери модель ^-^", reply_markup=models_keyboard(models))
+        await message.answer(f"выбери модель {kao()}", reply_markup=models_keyboard(models))
     except Exception as e:
         await message.answer(f"ошибка: {e}")
 
 @dp.message(Command("models"))
 async def show_models(message: Message):
     models = await get_models()
-    await message.answer("выбери модель ^-^", reply_markup=models_keyboard(models))
+    await message.answer(f"выбери модель {kao()}", reply_markup=models_keyboard(models))
 
 @dp.message(Command("clear"))
 async def clear_history(message: Message):
     user_history[message.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    await message.answer("история очищена, можем начать заново :3")
+    await message.answer(f"история очищена, можем начать заново {kao()}")
 
 @dp.callback_query(F.data.startswith("model:"))
 async def select_model(callback: CallbackQuery):
     model = callback.data.split("model:", 1)[1]
     user_model[callback.from_user.id] = model
     user_history[callback.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    await callback.message.edit_text(f"выбрана `{model}` ^^ теперь напиши сообщение", parse_mode="Markdown")
+    await callback.message.edit_text(f"выбрана `{model}` {kao()} теперь напиши сообщение", parse_mode="Markdown")
     await callback.answer()
 
 @dp.callback_query(F.data == "change_model")
 async def change_model_btn(callback: CallbackQuery):
     models = await get_models()
-    await callback.message.answer("выбери другую модель :d", reply_markup=models_keyboard(models))
+    await callback.message.answer(f"выбери другую модель {kao()}", reply_markup=models_keyboard(models))
     await callback.answer()
 
-@dp.message(F.photo | F.document | F.text)
-async def handle_prompt(message: Message):
-    uid = message.from_user.id
+async def process_single_or_album(messages: list):
+    # messages - 1 или несколько из одного альбома
+    first = messages[0]
+    uid = first.from_user.id
     if uid not in user_model:
-        await message.answer("сначала выбери модель через /start или /models")
+        await first.answer(f"сначала выбери модель через /start или /models {kao()}")
         return
+
     model = user_model[uid]
     history = get_history_with_system(uid)
 
-    text = message.caption or message.text or ""
-    if not text and message.photo:
-        text = "что на этом изображении?"
+    # текст - первый у кого есть caption/text
+    text = ""
+    for m in messages:
+        if m.caption:
+            text = m.caption
+            break
+        if m.text:
+            text = m.text
+            break
+    if not text and any(m.photo for m in messages):
+        text = f"что на этих изображениях? опиши по порядку {kao()}" if len(messages) > 1 else "что на этом изображении?"
 
-    image_url = None
-    if message.photo or (message.document and message.document.mime_type and message.document.mime_type.startswith("image/")):
-        try:
-            image_url = await photo_to_base64(message)
-        except Exception as e:
-            await message.answer(f"не смогла скачать картинку: {e}")
-            return
+    # собираем картинки
+    image_urls = []
+    for m in messages:
+        if m.photo or (m.document and m.document.mime_type and m.document.mime_type.startswith("image/")):
+            try:
+                b64 = await photo_to_base64(m)
+                if b64:
+                    image_urls.append(b64)
+            except:
+                continue
 
-    if image_url:
-        user_content = [
-            {"type": "text", "text": text},
-            {"type": "image_url", "image_url": {"url": image_url}}
-        ]
-        history.append({"role": "user", "content": user_content})
+    if image_urls:
+        content = [{"type": "text", "text": text}]
+        for url in image_urls:
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        history.append({"role": "user", "content": content})
     else:
         if not text:
             return
         history.append({"role": "user", "content": text})
 
-    msg = await message.answer(f"▌", parse_mode="Markdown")
+    msg = await first.answer(f"▌ {kao()}", parse_mode="Markdown")
     full_text = ""
-    final_usage = {}
     last_edit = 0
     try:
-        async for delta, usage in stream_chat(model, history):
-            if usage:
-                final_usage = usage
-            if delta:
-                full_text += delta
-                if time.time() - last_edit > 0.4:
-                    try:
-                        await msg.edit_text(full_text + " ▌")
-                        last_edit = time.time()
-                    except:
-                        pass
+        async for delta in stream_chat(model, history):
+            full_text += delta
+            if time.time() - last_edit > 0.4:
+                try:
+                    await msg.edit_text(full_text + " ▌")
+                    last_edit = time.time()
+                except:
+                    pass
         history.append({"role": "assistant", "content": full_text})
-        prompt_tokens = final_usage.get("prompt_tokens", "-")
-        completion_tokens = final_usage.get("completion_tokens", "-")
-        total_tokens = final_usage.get("total_tokens", "-")
-        final_text = (
-            f"{full_text}\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🤖 `{model}` | 📊 `prompt: {prompt_tokens} | comp: {completion_tokens} | total: {total_tokens}`"
-        )
-        if len(final_text) > 4096:
+        if len(full_text) > 4096:
             await msg.edit_text(full_text[:4096])
-            await message.answer(
-                f"━━━━━━━━━━━━━━━\n🤖 `{model}` | 📊 `total: {total_tokens}`",
-                parse_mode="Markdown",
-                reply_markup=change_model_keyboard()
-            )
+            await first.answer(full_text[4096:4096*2], reply_markup=change_model_keyboard())
         else:
-            await msg.edit_text(final_text, parse_mode="Markdown", reply_markup=change_model_keyboard())
+            await msg.edit_text(full_text, reply_markup=change_model_keyboard())
     except Exception as e:
         await msg.edit_text(f"ошибка: {e}")
+
+async def wait_and_process_album(group_id: str):
+    await asyncio.sleep(1.0)
+    messages = album_buffer.pop(group_id, [])
+    album_tasks.pop(group_id, None)
+    if not messages:
+        return
+    messages.sort(key=lambda m: m.message_id)
+    await process_single_or_album(messages)
+
+@dp.message(F.photo | F.document | F.text)
+async def handle_prompt(message: Message):
+    # если это альбом - буферизуем
+    if message.media_group_id:
+        gid = message.media_group_id
+        if gid not in album_buffer:
+            album_buffer[gid] = []
+            album_tasks[gid] = asyncio.create_task(wait_and_process_album(gid))
+        album_buffer[gid].append(message)
+        return
+    # одиночное сообщение
+    await process_single_or_album([message])
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
