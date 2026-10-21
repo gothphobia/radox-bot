@@ -123,6 +123,9 @@ class WhitelistMiddleware(BaseMiddleware):
 dp.update.outer_middleware(WhitelistMiddleware())
 
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+# ИСПРАВЛЕНИЕ 1: месяцы в родительном падеже для даты "28 октября"
+MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+
 album_buffer = {}
 album_tasks = {}
 
@@ -366,8 +369,9 @@ async def school_scheduler():
                 rasp = SCHEDULE.get(day) or ""
                 if not rasp.strip():
                     rasp = "расписание не задано, добавь через /schedule"
-                date_str = now.strftime("%d.%m.%Y, %A")
-                text = f"доброе утро!! {kao()} сегодня {date_str} {kao()} вот твое расписание на сегодня:\n{rasp}"
+                # ИСПРАВЛЕНИЕ 2: дата словом и день недели на русском
+                date_str = f"{now.day} {MONTHS[now.month - 1]}"
+                text = f"доброе утро!! {kao()} сегодня {date_str}, {day} {kao()} вот твое расписание на сегодня:\n{rasp}"
                 targets = set(owner_ids) | set(user_model.keys())
                 if not targets:
                     continue
