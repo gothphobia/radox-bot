@@ -24,8 +24,8 @@ env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-RADOX_API_KEY = os.getenv("RADOX_API_KEY")
-RADOX_BASE_URL = os.getenv("RADOX_BASE_URL", "https://radoxai.com/v1")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
 KAOMOJI = ["^^", "^-^", ">_<", "xd", ":3", ":p", ">//<", "uwu", "♡", ":d"]
 
@@ -35,7 +35,7 @@ def kao():
 SYSTEM_PROMPT = """ты — спокойная аниме-девушка. пиши только с маленькой буквы, каомодзи :3, ^^, xd, ^-^ умеренно и чередуй их, не повторяй одно и то же. без слащавости и без уменьшительно-ласкательных. на серьезные запросы — доклад, сочинение, реферат, код, анализ, объяснение — полностью выключи отыгрыш и пиши обычным грамотным стилем с заглавной буквы и без каомодзи."""
 
 ALLOWED_USERNAME = "gothphobia"
-FAVORITE_MODELS = ["claude-fable-5.1", "claude-opus-5.5", "gpt-5.6-luna"]
+FAVORITE_MODELS = ["deepseek-flash", "deepseek-v4-pro"]
 
 SCHEDULE = {
     "понедельник": "\n 0. разговоры о важном \n 1. английский язык \n 2. информатика \n 3. алгебра \n 4. георметрия \n 5. литература \n 6. В и С \n 7. физика \n 8. подготовка к егэ",
@@ -57,12 +57,37 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 user_model = {}
 user_history = {}
+user_effort = {}     # uid -> "none" | "low" | "high" | "max"
 owner_ids = set()
-HEADERS = {"Authorization": f"Bearer {RADOX_API_KEY}", "Content-Type": "application/json"}
+HEADERS = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 
+THINKING_EFFORT_LEVELS = ("low", "high", "max")
+THINKING_EFFORT_ALIASES = {"minimal": "low", "medium": "high", "xhigh": "high"}
+DEFAULT_EFFORT = "none"
+
+def thinking_payload(uid: int) -> dict:
+    effort = user_effort.get(uid, DEFAULT_EFFORT)
+    if effort == "none":
+        return {"thinking": {"type": "disabled"}}
+    return {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": effort,
+    }
+
 BLOCKED_FILE = Path(__file__).parent / "blocked.json"
-already_warned = set(json.loads(BLOCKED_FILE.read_text(encoding="utf-8"))) if BLOCKED_FILE.exists() else set()
+
+def load_blocked():
+    try:
+        raw = BLOCKED_FILE.read_text(encoding="utf-8").strip()
+        if not raw:
+            return set()
+        data = json.loads(raw)
+        return set(data) if isinstance(data, list) else set()
+    except (json.JSONDecodeError, OSError, ValueError):
+        return set()
+
+already_warned = load_blocked()
 
 def save_blocked():
     try:
@@ -158,17 +183,23 @@ def change_model_keyboard():
 async def get_models():
     connector = aiohttp.TCPConnector(ssl=ssl_context)
     async with aiohttp.ClientSession(connector=connector) as session:
-        async with session.get(f"{RADOX_BASE_URL}/models", headers=HEADERS) as resp:
+        async with session.get(f"{DEEPSEEK_BASE_URL}/models", headers=HEADERS) as resp:
             data = await resp.json()
             if "data" in data:
                 return [m["id"] for m in data["data"]]
             return data
 
-async def stream_chat(model: str, messages: list):
-    payload = {"model": model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
+async def stream_chat(model: str, messages: list, uid: int):
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        **thinking_payload(uid),
+    }
     connector = aiohttp.TCPConnector(ssl=ssl_context)
     async with aiohttp.ClientSession(connector=connector) as session:
-        async with session.post(f"{RADOX_BASE_URL}/chat/completions", headers=HEADERS, json=payload) as resp:
+        async with session.post(f"{DEEPSEEK_BASE_URL}/chat/completions", headers=HEADERS, json=payload) as resp:
             if resp.status != 200:
                 raise Exception(f"Ошибка API {resp.status}: {await resp.text()}")
             async for line in resp.content:
@@ -184,11 +215,11 @@ async def stream_chat(model: str, messages: list):
                     except:
                         continue
 
-async def non_stream_chat(model: str, messages: list):
-    payload = {"model": model, "messages": messages, "stream": False}
+async def non_stream_chat(model: str, messages: list, uid: int):
+    payload = {"model": model, "messages": messages, "stream": False, **thinking_payload(uid)}
     connector = aiohttp.TCPConnector(ssl=ssl_context)
     async with aiohttp.ClientSession(connector=connector) as session:
-        async with session.post(f"{RADOX_BASE_URL}/chat/completions", headers=HEADERS, json=payload) as resp:
+        async with session.post(f"{DEEPSEEK_BASE_URL}/chat/completions", headers=HEADERS, json=payload) as resp:
             data = await resp.json()
             return data["choices"][0]["message"]["content"]
 
@@ -201,33 +232,6 @@ async def photo_to_base64(message: Message):
     b64 = base64.b64encode(buf.read()).decode("utf-8")
     mime = message.document.mime_type if message.document and message.document.mime_type else "image/jpeg"
     return f"data:{mime};base64,{b64}"
-
-async def transcribe_voice(message: Message):
-    file_id = None
-    if message.voice:
-        file_id = message.voice.file_id
-    elif message.audio:
-        file_id = message.audio.file_id
-    elif message.video_note:
-        file_id = message.video_note.file_id
-    elif message.document and message.document.mime_type and message.document.mime_type.startswith("audio"):
-        file_id = message.document.file_id
-    if not file_id:
-        return None
-    file = await bot.get_file(file_id)
-    buf = BytesIO()
-    await bot.download(file, buf)
-    buf.seek(0)
-    data = aiohttp.FormData()
-    data.add_field("file", buf, filename="voice.ogg", content_type="audio/ogg")
-    data.add_field("model", "whisper-1")
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        async with session.post(f"{RADOX_BASE_URL}/audio/transcriptions", headers={"Authorization": f"Bearer {RADOX_API_KEY}"}, data=data) as resp:
-            if resp.status != 200:
-                raise Exception(await resp.text())
-            j = await resp.json()
-            return j.get("text") or j.get("transcription")
 
 async def extract_doc_text(message: Message):
     if not message.document:
@@ -259,6 +263,7 @@ async def set_commands():
         BotCommand(command="start", description=f"запустить и выбрать модель {kao()}"),
         BotCommand(command="models", description=f"сменить модель {kao()}"),
         BotCommand(command="clear", description="очистить историю"),
+        BotCommand(command="effort", description="глубина размышления"),
         BotCommand(command="remind", description="напомнить"),
         BotCommand(command="school", description="школа"),
         BotCommand(command="schedule", description="задать расписание"),
@@ -281,6 +286,29 @@ async def show_models(message: Message):
 async def clear_history(message: Message):
     user_history[message.from_user.id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     await message.answer(f"история очищена, можем начать заново {kao()}")
+
+@dp.message(Command("effort"))
+async def effort_cmd(message: Message):
+    uid = message.from_user.id
+    parts = message.text.split(maxsplit=1)
+    arg = parts[1].strip().lower() if len(parts) > 1 else ""
+    if not arg:
+        cur = user_effort.get(uid, DEFAULT_EFFORT)
+        await message.answer(
+            f"effort: {cur} {kao()}\n"
+            f"none — размышление выключено\n"
+            f"low, high, max — размышление включено"
+        )
+        return
+    arg = THINKING_EFFORT_ALIASES.get(arg, arg)
+    if arg == "none":
+        user_effort[uid] = "none"
+        await message.answer(f"effort: none, размышление выключено {kao()}")
+    elif arg in THINKING_EFFORT_LEVELS:
+        user_effort[uid] = arg
+        await message.answer(f"effort: {arg}, размышление включено {kao()}")
+    else:
+        await message.answer(f"не поняла {kao()}, доступно: low, high, max, none")
 
 def parse_time(s: str):
     s = s.lower().strip()
@@ -413,7 +441,7 @@ async def inline_handler(query: InlineQuery):
         return
     model = user_model.get(query.from_user.id, FAVORITE_MODELS[0])
     try:
-        ans = await non_stream_chat(model, [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": text}])
+        ans = await non_stream_chat(model, [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": text}], query.from_user.id)
         result = InlineQueryResultArticle(id="1", title=f"ответ через {model}", description=ans[:50], input_message_content=InputTextMessageContent(message_text=ans))
         await bot.answer_inline_query(query.id, [result], cache_time=10)
     except:
@@ -429,16 +457,8 @@ async def process_single_or_album(messages: list):
     model = user_model[uid]
     history = get_history_with_system(uid)
     if first.voice or first.audio or first.video_note:
-        try:
-            text = await transcribe_voice(first)
-            if not text:
-                await first.answer(f"не расслышала {kao()}")
-                return
-            await first.answer(f"расслышала: _{text}_ {kao()}", parse_mode="Markdown")
-            history.append({"role": "user", "content": text})
-        except Exception as e:
-            await first.answer(f"ошибка расшифровки: {e}")
-            return
+        await first.answer(f"голосовые не поддерживаются через deepseek api {kao()}, напиши текстом или пришли картинку")
+        return
     else:
         doc_text = None
         if first.document and not (first.document.mime_type and first.document.mime_type.startswith("image/")):
@@ -475,11 +495,11 @@ async def process_single_or_album(messages: list):
             if not text:
                 return
             history.append({"role": "user", "content": text})
-    msg = await first.answer(f"▌")
+    msg = await first.answer("думаю... ▌" if user_effort.get(uid, DEFAULT_EFFORT) != "none" else "▌")
     full = ""
     last = 0
     try:
-        async for delta in stream_chat(model, history):
+        async for delta in stream_chat(model, history, uid):
             full += delta
             if time.time() - last > 0.4:
                 try:
