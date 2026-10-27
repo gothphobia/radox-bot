@@ -3,7 +3,6 @@ import json
 import asyncio
 import time
 import random
-import re
 import ssl
 import base64
 import tempfile
@@ -17,10 +16,11 @@ from dotenv import load_dotenv
 from apscheduler.triggers.cron import CronTrigger
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, FSInputFile
+from aiogram.types import Message, CallbackQuery, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Update, InlineQuery, InlineQueryResultArticle, InputTextMessageContent, FSInputFile
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
+from aiogram.exceptions import TelegramBadRequest
 
 import briefing
 import db
@@ -68,6 +68,31 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 background_tasks = set()
+pending: dict[int, tuple[str, str | None]] = {}  # ожидание ввода: город, расписание
+
+MAIN_MENU = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📅 Календарь"), KeyboardButton(text="✅ Дела")],
+        [KeyboardButton(text="⏰ Напоминания"), KeyboardButton(text="🧠 Память")],
+        [KeyboardButton(text="🌅 Брифинг"), KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="❓ Помощь")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="напиши сообщение или выбери раздел",
+)
+
+HELP_TEXT = """просто напиши, что нужно — я пойму:
+
+• напомни завтра в 9 про математику
+• поставь встречу в четверг в 16:00
+• что у меня сегодня по расписанию?
+• какая погода завтра?
+• найди в интернете …
+• запомни, что я люблю зелёный чай
+• ответь голосом: …
+
+кнопки внизу открывают календарь, дела, напоминания, память, брифинг и настройки."""
 
 
 def spawn(coro):
@@ -427,33 +452,23 @@ async def extract_doc_text(message: Message):
 
 async def set_commands():
     await bot.set_my_commands([
-        BotCommand(command="start", description=f"запустить и выбрать модель {kao()}"),
-        BotCommand(command="models", description=f"сменить модель {kao()}"),
-        BotCommand(command="clear", description="очистить историю"),
-        BotCommand(command="effort", description="глубина размышления"),
-        BotCommand(command="remind", description="напомнить"),
-        BotCommand(command="reminders", description="список напоминаний"),
-        BotCommand(command="todos", description="список дел"),
-        BotCommand(command="events", description="календарь на неделю"),
-        BotCommand(command="city", description="город для погоды"),
-        BotCommand(command="tools", description="инструменты вкл/выкл"),
-        BotCommand(command="voice", description="голосовые ответы вкл/выкл"),
-        BotCommand(command="say", description="озвучить текст"),
-        BotCommand(command="memory", description="что я помню"),
-        BotCommand(command="remember", description="запомнить факт"),
-        BotCommand(command="forget", description="забыть факт"),
-        BotCommand(command="briefing", description="утренний брифинг"),
-        BotCommand(command="schedule", description="задать расписание"),
-        BotCommand(command="schedule_show", description="показать расписание"),
+        BotCommand(command="start", description="главное меню"),
     ])
 
 @dp.message(CommandStart())
 async def start(message: Message):
-    await message.answer(f"привет {kao()} загружаю список моделей")
-    try:
-        await message.answer(f"выбери модель {kao()}", reply_markup=models_keyboard(await get_models()))
-    except Exception as e:
-        await message.answer(f"ошибка: {e}")
+    uid = message.from_user.id
+    pending.pop(uid, None)
+    await message.answer(
+        "привет ^^ я на связи.\nвыбирай раздел кнопками внизу или просто напиши, что нужно.",
+        reply_markup=MAIN_MENU,
+    )
+    user = db.get_user(uid)
+    if not user["model"]:
+        try:
+            await message.answer(f"для начала выбери модель {kao()}", reply_markup=models_keyboard(await get_models()))
+        except Exception as e:
+            await message.answer(f"ошибка: {e}")
 
 @dp.message(Command("models"))
 async def show_models(message: Message):
@@ -486,42 +501,6 @@ async def effort_cmd(message: Message):
         await message.answer(f"effort: {arg}, размышление включено {kao()}")
     else:
         await message.answer(f"не поняла {kao()}, доступно: low, high, max, none")
-
-def parse_time(s: str):
-    s = s.lower().strip()
-    m = re.match(r"(\d+)\s*([smhдчм]|sec|min|час|дней|day|hour)", s)
-    if m:
-        n = int(m.group(1))
-        u = m.group(2)
-        if u in ["s", "sec", "с", "сек"]:
-            return n
-        if u in ["m", "min", "м", "мин"]:
-            return n * 60
-        if u in ["h", "час", "ч", "hour"]:
-            return n * 3600
-        if u in ["д", "дней", "day"]:
-            return n * 86400
-    return None
-
-@dp.message(Command("remind"))
-@dp.message(Command("напомни"))
-async def remind_cmd(message: Message):
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.answer(f"пиши так {kao()}: /remind 10m покормить кота")
-        return
-    delay = parse_time(parts[1])
-    if not delay:
-        await message.answer(f"не поняла время {kao()}, пиши 10m, 2ч, 30s")
-        return
-    text = parts[2]
-    due_ts = int((datetime.now(ZoneInfo(SCHOOL_TZ)) + timedelta(seconds=delay)).timestamp())
-    rid = db.add_reminder(message.from_user.id, text, due_ts)
-    sched.schedule_reminder(db.get_reminder(rid))
-    due = datetime.fromtimestamp(due_ts, ZoneInfo(SCHOOL_TZ))
-    await message.answer(
-        f"ок {kao()}, напомню {due:%d.%m в %H:%M}: {text}"
-    )
 
 @dp.message(Command("reminders"))
 async def reminders_cmd(message: Message):
@@ -766,17 +745,28 @@ async def select_model(callback: CallbackQuery):
     uid = callback.from_user.id
     db.set_user(uid, model=model)
     db.clear_history(uid)
-    await callback.message.edit_text(f"выбрана `{model}` {kao()} теперь напиши сообщение", parse_mode="Markdown")
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⚙️ настройки", callback_data="set:home")
+    ]])
+    await callback.message.edit_text(
+        f"выбрана `{model}` {kao()} теперь напиши сообщение",
+        parse_mode="Markdown",
+        reply_markup=markup,
+    )
     await callback.answer()
 
 @dp.callback_query(F.data == "change_model")
 async def change_model_btn(callback: CallbackQuery):
-    await callback.message.answer(f"выбери другую модель {kao()}", reply_markup=models_keyboard(await get_models()))
+    markup = models_keyboard(await get_models())
+    markup.inline_keyboard.append([InlineKeyboardButton(text="⚙️ настройки", callback_data="set:home")])
+    await callback.message.answer(f"выбери другую модель {kao()}", reply_markup=markup)
     await callback.answer()
 
 @dp.callback_query(F.data == "show_all")
 async def show_all(callback: CallbackQuery):
-    await callback.message.edit_text(f"выбери модель {kao()}", reply_markup=models_keyboard(await get_models(), show_all=True))
+    markup = models_keyboard(await get_models(), show_all=True)
+    markup.inline_keyboard.append([InlineKeyboardButton(text="⚙️ настройки", callback_data="set:home")])
+    await callback.message.edit_text(f"выбери модель {kao()}", reply_markup=markup)
     await callback.answer()
 
 @dp.inline_query()
@@ -844,6 +834,482 @@ async def build_content(first: Message, messages: list, status: Message):
     return text or None
 
 
+# ---------- кнопочное меню ----------
+
+def _label(text, limit: int = 30) -> str:
+    return " ".join(str(text).split())[:limit]
+
+
+def _span_short(starts_ts: int, ends_ts: int, tz) -> str:
+    start = datetime.fromtimestamp(starts_ts, tz)
+    end = datetime.fromtimestamp(ends_ts, tz)
+    if start.date() == end.date():
+        return f"{start:%d.%m %H:%M}–{end:%H:%M}"
+    return f"{start:%d.%m %H:%M} – {end:%d.%m %H:%M}"
+
+
+def _calendar_bounds(key: str):
+    tz = ZoneInfo(SCHOOL_TZ)
+    now = datetime.now(tz)
+    if key == "today":
+        start = datetime(now.year, now.month, now.day, tzinfo=tz)
+        return start, start + timedelta(days=1), "сегодня"
+    try:
+        days = max(1, min(int(key), 365))
+    except (TypeError, ValueError):
+        days = 7
+    return now, now + timedelta(days=days), f"{days} дн."
+
+
+def calendar_payload(uid: int, key: str = "7"):
+    start, end, label = _calendar_bounds(key)
+    tz = ZoneInfo(SCHOOL_TZ)
+    rows = db.list_events(uid, int(start.timestamp()), int(end.timestamp()))
+    if rows:
+        lines = [f"📅 календарь: {label}"]
+        for e in rows[:12]:
+            note = f"\n   {e['notes']}" if e["notes"] else ""
+            lines.append(
+                f"#{e['id']} — {_span_short(e['starts_ts'], e['ends_ts'], tz)} — {e['title']}{note}"
+            )
+        if len(rows) > 12:
+            lines.append(f"… и ещё {len(rows) - 12}")
+    else:
+        lines = [f"📅 на {label} событий нет"]
+    lines.append("\nдобавить: напиши «поставь встречу …»")
+
+    buttons = [[
+        InlineKeyboardButton(text="сегодня", callback_data="cal:days:today"),
+        InlineKeyboardButton(text="7 дней", callback_data="cal:days:7"),
+        InlineKeyboardButton(text="30 дней", callback_data="cal:days:30"),
+    ]]
+    for e in rows[:10]:
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 {_label(e['title'], 28)}",
+            callback_data=f"cal:del:{e['id']}:{key}",
+        )])
+    buttons.append([InlineKeyboardButton(text="➕ добавить", callback_data="cal:add")])
+    return "\n".join(lines)[:3900], InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def todos_payload(uid: int, include_done: bool = False):
+    rows = db.list_todos(uid, include_done)
+    if rows:
+        lines = ["✅ дела:"]
+        for t in rows:
+            lines.append(f"{'✓' if t['done'] else '•'} #{t['id']} — {t['text']}")
+    else:
+        lines = ["✅ дел нет"]
+    lines.append("\nдобавить: напиши «добавь дело …»")
+
+    buttons = [[InlineKeyboardButton(text="➕ добавить", callback_data="todo:add")]]
+    toggle_text = "скрыть выполненные" if include_done else "показать выполненные"
+    buttons.append([InlineKeyboardButton(
+        text=toggle_text, callback_data=f"todo:list:{0 if include_done else 1}"
+    )])
+    for t in rows:
+        if not t["done"]:
+            buttons.append([InlineKeyboardButton(
+                text=f"✓ {_label(t['text'])}",
+                callback_data=f"todo:done:{t['id']}:{1 if include_done else 0}",
+            )])
+    return "\n".join(lines)[:3900], InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def reminders_payload(uid: int):
+    rows = db.list_reminders(uid)
+    tz = ZoneInfo(SCHOOL_TZ)
+    if rows:
+        lines = ["⏰ напоминания:"]
+        for r in rows:
+            due = datetime.fromtimestamp(r["due_ts"], tz)
+            repeat = {"daily": " · каждый день", "weekly": " · каждую неделю"}.get(r["repeat"], "")
+            lines.append(f"#{r['id']} — {due:%d.%m %H:%M}{repeat} — {r['text']}")
+    else:
+        lines = ["⏰ напоминаний нет"]
+    lines.append("\nдобавить: напиши «напомни …»")
+
+    buttons = [[InlineKeyboardButton(text="➕ добавить", callback_data="rem:add")]]
+    for r in rows[:10]:
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 {_label(r['text'])}", callback_data=f"rem:del:{r['id']}"
+        )])
+    return "\n".join(lines)[:3900], InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def memory_payload(uid: int):
+    facts = db.list_facts(uid)
+    summary = db.get_summary(uid)
+    lines = ["🧠 память:"]
+    if facts:
+        for f in facts[:40]:
+            lines.append(f"#{f['id']} — {f['text']}")
+        if len(facts) > 40:
+            lines.append(f"… и ещё {len(facts) - 40}")
+    else:
+        lines.append("фактов пока нет")
+    if summary:
+        lines.append(f"\nконспект прошлых разговоров: {len(summary['text'])} символов")
+    lines.append("\nзапомнить: напиши «запомни, что …»")
+
+    buttons = [[InlineKeyboardButton(text="➕ запомнить", callback_data="mem:add")]]
+    if summary:
+        buttons.append([InlineKeyboardButton(text="📝 показать конспект", callback_data="mem:summary")])
+    if facts:
+        buttons.append([InlineKeyboardButton(text="🧹 очистить факты", callback_data="mem:clear")])
+    for f in facts[:8]:
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 {_label(f['text'])}", callback_data=f"mem:del:{f['id']}"
+        )])
+    return "\n".join(lines)[:3900], InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def settings_payload(uid: int):
+    user = db.get_user(uid)
+    briefing_on = db.get_setting("school_enabled", "1") == "1"
+    effort = user["effort"] or DEFAULT_EFFORT
+    lines = [
+        "⚙️ настройки:",
+        f"модель: {user['model'] or 'не выбрана'}",
+        f"effort: {effort}",
+        f"город: {user['city']}",
+        f"инструменты: {'вкл' if user['tools'] else 'выкл'}",
+        f"голос: {'вкл' if user['voice'] else 'выкл'}",
+        f"брифинг: {'вкл' if briefing_on else 'выкл'} "
+        f"({BRIEFING_WEEKDAY_TIME} будни / {BRIEFING_WEEKEND_TIME} выходные)",
+    ]
+    buttons = [
+        [InlineKeyboardButton(text=f"🤖 модель: {user['model'] or 'выбрать'}", callback_data="set:model")],
+        [InlineKeyboardButton(text=f"🧠 effort: {effort}", callback_data="set:effort")],
+        [InlineKeyboardButton(text=f"🏙 город: {user['city']}", callback_data="set:city")],
+        [InlineKeyboardButton(
+            text=f"🔧 инструменты: {'вкл' if user['tools'] else 'выкл'}",
+            callback_data="set:tools",
+        )],
+        [InlineKeyboardButton(
+            text=f"🔊 голос: {'вкл' if user['voice'] else 'выкл'}",
+            callback_data="set:voice",
+        )],
+        [InlineKeyboardButton(
+            text=f"🌅 брифинг: {'вкл' if briefing_on else 'выкл'}",
+            callback_data="set:briefing",
+        )],
+        [InlineKeyboardButton(text="📚 расписание", callback_data="set:schedule")],
+        [InlineKeyboardButton(text="🧹 очистить историю", callback_data="set:clear")],
+    ]
+    return "\n".join(lines)[:3900], InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def schedule_payload():
+    schedule = db.get_schedule()
+    lines = ["📚 расписание:"]
+    for day in WEEKDAYS:
+        lines.append(f"{day}: {schedule.get(day) or '— пусто'}")
+    buttons = []
+    for i in range(0, len(WEEKDAYS), 2):
+        row = [
+            InlineKeyboardButton(text=WEEKDAYS[j], callback_data=f"sched:{j}")
+            for j in range(i, min(i + 2, len(WEEKDAYS)))
+        ]
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⬅️ назад", callback_data="set:home")])
+    return "\n\n".join(lines)[:3900], InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def safe_edit(message: Message, text: str, markup=None):
+    try:
+        await message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        await message.answer(text, reply_markup=markup)
+    except Exception:
+        await message.answer(text, reply_markup=markup)
+
+
+async def show_settings(message: Message):
+    text, markup = settings_payload(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@dp.message(F.text == "📅 Календарь")
+async def menu_calendar(message: Message):
+    pending.pop(message.from_user.id, None)
+    text, markup = calendar_payload(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@dp.message(F.text == "✅ Дела")
+async def menu_todos(message: Message):
+    pending.pop(message.from_user.id, None)
+    text, markup = todos_payload(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@dp.message(F.text == "⏰ Напоминания")
+async def menu_reminders(message: Message):
+    pending.pop(message.from_user.id, None)
+    text, markup = reminders_payload(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@dp.message(F.text == "🧠 Память")
+async def menu_memory(message: Message):
+    pending.pop(message.from_user.id, None)
+    text, markup = memory_payload(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@dp.message(F.text == "⚙️ Настройки")
+async def menu_settings(message: Message):
+    pending.pop(message.from_user.id, None)
+    await show_settings(message)
+
+
+@dp.message(F.text == "🌅 Брифинг")
+async def menu_briefing(message: Message):
+    pending.pop(message.from_user.id, None)
+    await message.answer(f"собираю брифинг {kao()}...")
+    await morning_briefing(target_uid=message.from_user.id, force=True)
+
+
+@dp.message(F.text == "❓ Помощь")
+async def menu_help(message: Message):
+    pending.pop(message.from_user.id, None)
+    await message.answer(HELP_TEXT)
+
+
+@dp.callback_query(F.data.startswith("cal:"))
+async def cal_cb(callback: CallbackQuery):
+    uid = callback.from_user.id
+    parts = callback.data.split(":")
+    if parts[1] == "add":
+        await callback.answer("напиши: поставь встречу 30 октября в 16:00", show_alert=True)
+        return
+    if parts[1] == "days":
+        key = parts[2] if len(parts) > 2 else "7"
+        text, markup = calendar_payload(uid, key)
+        await safe_edit(callback.message, text, markup)
+    elif parts[1] == "del":
+        try:
+            eid = int(parts[2])
+        except (ValueError, IndexError):
+            await callback.answer("не поняла событие", show_alert=True)
+            return
+        key = parts[3] if len(parts) > 3 else "7"
+        db.delete_event(uid, eid)
+        text, markup = calendar_payload(uid, key)
+        await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("todo:"))
+async def todo_cb(callback: CallbackQuery):
+    uid = callback.from_user.id
+    parts = callback.data.split(":")
+    if parts[1] == "add":
+        await callback.answer("напиши: добавь дело дочитать книгу", show_alert=True)
+        return
+    if parts[1] == "done":
+        try:
+            tid = int(parts[2])
+        except (ValueError, IndexError):
+            await callback.answer("не поняла дело", show_alert=True)
+            return
+        include_done = len(parts) > 3 and parts[3] == "1"
+        db.complete_todo(uid, tid)
+        text, markup = todos_payload(uid, include_done)
+        await safe_edit(callback.message, text, markup)
+    elif parts[1] == "list":
+        include_done = len(parts) > 2 and parts[2] == "1"
+        text, markup = todos_payload(uid, include_done)
+        await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("rem:"))
+async def rem_cb(callback: CallbackQuery):
+    uid = callback.from_user.id
+    parts = callback.data.split(":")
+    if parts[1] == "add":
+        await callback.answer("напиши: напомни завтра в 9 про математику", show_alert=True)
+        return
+    if parts[1] == "del":
+        try:
+            rid = int(parts[2])
+        except (ValueError, IndexError):
+            await callback.answer("не поняла напоминание", show_alert=True)
+            return
+        reminder = db.get_reminder(rid)
+        if reminder and reminder["uid"] == uid:
+            db.delete_reminder(rid)
+            sched.cancel_reminder_job(rid)
+        text, markup = reminders_payload(uid)
+        await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("mem:"))
+async def mem_cb(callback: CallbackQuery):
+    uid = callback.from_user.id
+    parts = callback.data.split(":")
+    if parts[1] == "add":
+        await callback.answer("напиши: запомни, что я люблю зелёный чай", show_alert=True)
+        return
+    if parts[1] == "summary":
+        summary = db.get_summary(uid)
+        await callback.message.answer(summary["text"] if summary else "конспекта пока нет")
+        await callback.answer()
+        return
+    if parts[1] == "clear":
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="да, очистить", callback_data="mem:clear_yes"),
+            InlineKeyboardButton(text="отмена", callback_data="mem:back"),
+        ]])
+        await safe_edit(callback.message, "точно удалить все факты? конспект останется.", markup)
+        await callback.answer()
+        return
+    if parts[1] == "clear_yes":
+        db.clear_facts(uid)
+    elif parts[1] == "del":
+        try:
+            fid = int(parts[2])
+        except (ValueError, IndexError):
+            await callback.answer("не поняла факт", show_alert=True)
+            return
+        db.delete_fact(uid, fid)
+    text, markup = memory_payload(uid)
+    await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:home")
+async def set_home(callback: CallbackQuery):
+    text, markup = settings_payload(callback.from_user.id)
+    await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:model")
+async def set_model(callback: CallbackQuery):
+    try:
+        models = await get_models()
+    except Exception as e:
+        await callback.answer(f"ошибка: {e}", show_alert=True)
+        return
+    markup = models_keyboard(models)
+    markup.inline_keyboard.append(
+        [InlineKeyboardButton(text="⬅️ назад", callback_data="set:home")]
+    )
+    await safe_edit(callback.message, "выбери модель:", markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:effort")
+async def set_effort(callback: CallbackQuery):
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="none", callback_data="eff:none"),
+            InlineKeyboardButton(text="low", callback_data="eff:low"),
+        ],
+        [
+            InlineKeyboardButton(text="high", callback_data="eff:high"),
+            InlineKeyboardButton(text="max", callback_data="eff:max"),
+        ],
+        [InlineKeyboardButton(text="⬅️ назад", callback_data="set:home")],
+    ])
+    await safe_edit(callback.message, "глубина размышления:", markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("eff:"))
+async def eff_cb(callback: CallbackQuery):
+    value = callback.data.split(":", 1)[1]
+    if value in ("none", *THINKING_EFFORT_LEVELS):
+        db.set_user(callback.from_user.id, effort=value)
+    text, markup = settings_payload(callback.from_user.id)
+    await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:city")
+async def set_city(callback: CallbackQuery):
+    pending[callback.from_user.id] = ("city", None)
+    await callback.message.answer("пришли город одним сообщением, например: Москва")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:tools")
+async def set_tools(callback: CallbackQuery):
+    user = db.get_user(callback.from_user.id)
+    db.set_user(callback.from_user.id, tools=0 if user["tools"] else 1)
+    text, markup = settings_payload(callback.from_user.id)
+    await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:voice")
+async def set_voice(callback: CallbackQuery):
+    user = db.get_user(callback.from_user.id)
+    db.set_user(callback.from_user.id, voice=0 if user["voice"] else 1)
+    text, markup = settings_payload(callback.from_user.id)
+    await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:briefing")
+async def set_briefing(callback: CallbackQuery):
+    current = db.get_setting("school_enabled", "1")
+    db.set_setting("school_enabled", "0" if current == "1" else "1")
+    text, markup = settings_payload(callback.from_user.id)
+    await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:schedule")
+async def set_schedule(callback: CallbackQuery):
+    text, markup = schedule_payload()
+    await safe_edit(callback.message, text, markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("sched:"))
+async def sched_cb(callback: CallbackQuery):
+    try:
+        idx = int(callback.data.split(":", 1)[1])
+        day = WEEKDAYS[idx]
+    except (ValueError, IndexError):
+        await callback.answer("не поняла день", show_alert=True)
+        return
+    pending[callback.from_user.id] = ("schedule", day)
+    await callback.message.answer(
+        f"пришли расписание на {day} одним сообщением (или «-», чтобы очистить)"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:clear")
+async def set_clear(callback: CallbackQuery):
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="да, очистить", callback_data="set:clear_yes"),
+        InlineKeyboardButton(text="отмена", callback_data="set:home"),
+    ]])
+    await safe_edit(
+        callback.message,
+        "очистить историю и конспект? факты о тебе останутся.",
+        markup,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "set:clear_yes")
+async def set_clear_yes(callback: CallbackQuery):
+    db.clear_history(callback.from_user.id)
+    text, markup = settings_payload(callback.from_user.id)
+    await safe_edit(callback.message, "история очищена.\n\n" + text, markup)
+    await callback.answer()
+
+
 async def process_single_or_album(messages: list):
     first = messages[0]
     uid = first.from_user.id
@@ -901,6 +1367,23 @@ async def wait_and_process_album(gid: str):
 
 @dp.message(F.photo | F.document | F.voice | F.audio | F.video_note | F.text | F.caption)
 async def handle_prompt(message: Message):
+    uid = message.from_user.id
+    action = pending.pop(uid, None)
+    if action and message.text:
+        kind, extra = action
+        text = message.text.strip()
+        if kind == "city" and text:
+            db.set_user(uid, city=text[:80])
+            await message.answer(f"город сохранён: {text[:80]} {kao()}")
+            await show_settings(message)
+            return
+        if kind == "schedule":
+            db.set_schedule(extra, "" if text == "-" else text)
+            await message.answer(f"расписание на {extra} сохранено {kao()}")
+            text2, markup = schedule_payload()
+            await message.answer(text2, reply_markup=markup)
+            return
+
     if message.media_group_id:
         gid = message.media_group_id
         if gid not in album_buffer:
