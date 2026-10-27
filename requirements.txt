@@ -1,6 +1,12 @@
 aiogram>=3.0
 aiohttp
+apscheduler>=3.10,<4
 python-dotenv
 certifi
 pypdf
 python-docx
+faster-whisper>=1.2
+edge-tts>=7.0
+av>=14
+numpy
+ddgs>=9.0

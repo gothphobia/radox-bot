@@ -3,3 +3,7 @@
 .idea/
 blocked.json
 .DS_Store
+__pycache__/
+bot.db
+bot.db-wal
+bot.db-shm
